@@ -1,0 +1,629 @@
+# Task Management Application
+
+This is a simple Task Management application built with:
+- **Frontend:** React + TypeScript
+- **Backend:** Node.js (Express) + TypeScript
+- **Database:** PostgreSQL
+
+## Features
+- **User Authentication:** Registration and login with password hashing (bcrypt) and JWT.
+- **Task CRUD:** Create, view, update, and delete tasks (each task is linked to the authenticated user).
+- **Protected Routes:** Task routes require a valid JWT.
+
+## Project Structure
+
+
+
+
+project-root/
+├── backend/
+│   ├── src/
+│   │   ├── db.ts
+│   │   ├── index.ts
+│   │   ├── middleware/
+│   │   │   └── authMiddleware.ts
+│   │   └── routes/
+│   │       ├── auth.ts
+│   │       └── tasks.ts
+│   ├── package.json
+│   ├── tsconfig.json
+│   └── .env.example
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── Login.tsx
+│   │   │   ├── Register.tsx
+│   │   │   └── Tasks.tsx
+│   │   ├── App.tsx
+│   │   └── index.tsx
+│   ├── package.json
+│   ├── tsconfig.json
+│   └── .env.example
+├── README.md
+└── DEMO.md (or a section in README.md)
+
+Backend
+1. package.json
+{
+  "name": "task-manager-backend",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn src/index.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "bcrypt": "^5.0.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.0",
+    "express": "^4.17.1",
+    "jsonwebtoken": "^9.0.0",
+    "pg": "^8.7.1"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.0",
+    "@types/cors": "^2.8.12",
+    "@types/express": "^4.17.13",
+    "@types/jsonwebtoken": "^9.0.0",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^4.5.2"
+  }
+}
+
+2. tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES6",
+    "module": "commonjs",
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true
+  }
+}
+
+3. src/db.ts
+
+import { Pool } from 'pg';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+
+export default pool;
+
+4.  src/index.ts
+
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+
+import authRoutes from './routes/auth';
+import taskRoutes from './routes/tasks';
+
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+app.use(cors());
+app.use(express.json());
+
+app.use('/auth', authRoutes);
+app.use('/tasks', taskRoutes);
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+5. src/routes/auth.ts
+
+import express from 'express';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
+import pool from '../db';
+
+const router = express.Router();
+const saltRounds = 10;
+
+// POST /auth/register
+router.post('/register', async (req, res) => {
+  const { username, password } = req.body;
+  try {
+    // Check if user exists
+    const userCheck = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+    if (userCheck.rows.length > 0) {
+      return res.status(400).json({ error: 'User already exists' });
+    }
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    // Insert user
+    const result = await pool.query(
+      'INSERT INTO users (username, password) VALUES ($1, $2) RETURNING id, username',
+      [username, hashedPassword]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /auth/login
+router.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  try {
+    const userResult = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+    if (userResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+    const user = userResult.rows[0];
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+    const token = jwt.sign(
+      { userId: user.id, username: user.username },
+      process.env.JWT_SECRET as string,
+      { expiresIn: '1h' }
+    );
+    res.json({ token });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+export default router;
+
+
+6.src/middleware/authMiddleware.ts
+
+import { Request, Response, NextFunction } from 'express';
+import jwt from 'jsonwebtoken';
+
+interface AuthRequest extends Request {
+  user?: any;
+}
+
+export const authenticateToken = (req: AuthRequest, res: Response, next: NextFunction) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // expects "Bearer <token>"
+
+  if (!token) return res.status(401).json({ error: 'Access denied, token missing!' });
+
+  jwt.verify(token, process.env.JWT_SECRET as string, (err, user) => {
+    if (err) return res.status(403).json({ error: 'Invalid token' });
+    req.user = user;
+    next();
+  });
+};
+
+7.  src/routes/tasks.ts
+
+import express from 'express';
+import pool from '../db';
+import { authenticateToken } from '../middleware/authMiddleware';
+
+const router = express.Router();
+
+// GET /tasks – retrieve tasks for the authenticated user
+router.get('/', authenticateToken, async (req: any, res) => {
+  try {
+    const userId = req.user.userId;
+    const result = await pool.query('SELECT * FROM tasks WHERE "userId" = $1', [userId]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /tasks – create a new task
+router.post('/', authenticateToken, async (req: any, res) => {
+  const { title, description } = req.body;
+  try {
+    const userId = req.user.userId;
+    const result = await pool.query(
+      'INSERT INTO tasks (title, description, "userId") VALUES ($1, $2, $3) RETURNING *',
+      [title, description, userId]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /tasks/:id – update a task (e.g., mark complete or edit)
+router.put('/:id', authenticateToken, async (req: any, res) => {
+  const { id } = req.params;
+  const { title, description, isComplete } = req.body;
+  try {
+    const userId = req.user.userId;
+    // Verify task belongs to user
+    const taskCheck = await pool.query('SELECT * FROM tasks WHERE id = $1 AND "userId" = $2', [id, userId]);
+    if (taskCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+    const result = await pool.query(
+      'UPDATE tasks SET title = $1, description = $2, "isComplete" = $3 WHERE id = $4 RETURNING *',
+      [title, description, isComplete, id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// DELETE /tasks/:id – delete a task
+router.delete('/:id', authenticateToken, async (req: any, res) => {
+  const { id } = req.params;
+  try {
+    const userId = req.user.userId;
+    // Verify task belongs to user
+    const taskCheck = await pool.query('SELECT * FROM tasks WHERE id = $1 AND "userId" = $2', [id, userId]);
+    if (taskCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+    await pool.query('DELETE FROM tasks WHERE id = $1', [id]);
+    res.json({ message: 'Task deleted' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+export default router;
+
+Frontend
+1. package.json
+
+{
+  "name": "task-manager-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@testing-library/jest-dom": "^5.16.5",
+    "@testing-library/react": "^13.4.0",
+    "@testing-library/user-event": "^13.5.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.3.0",
+    "react-scripts": "5.0.1",
+    "typescript": "^4.8.4",
+    "web-vitals": "^2.1.4"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  }
+}
+
+2. tsconfig.json
+
+{
+  "compilerOptions": {
+    "target": "es5",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+    "module": "esnext",
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx"
+  },
+  "include": ["src"]
+}
+
+3. src/index.tsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+4. src/App.tsx
+
+import React from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import Login from './components/Login';
+import Register from './components/Register';
+import Tasks from './components/Tasks';
+
+function App() {
+  const isAuthenticated = !!localStorage.getItem('token');
+
+  return (
+    <Router>
+      <Routes>
+        <Route path="/login" element={!isAuthenticated ? <Login /> : <Navigate to="/tasks" />} />
+        <Route path="/register" element={!isAuthenticated ? <Register /> : <Navigate to="/tasks" />} />
+        <Route path="/tasks" element={isAuthenticated ? <Tasks /> : <Navigate to="/login" />} />
+        <Route path="*" element={<Navigate to={isAuthenticated ? "/tasks" : "/login"} />} />
+      </Routes>
+    </Router>
+  );
+}
+
+export default App;
+
+5. src/components/Login.tsx
+
+import React, { useState } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
+
+const Login: React.FC = () => {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const navigate = useNavigate();
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const response = await fetch(`${process.env.REACT_APP_API_URL}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await response.json();
+      if (response.ok) {
+        localStorage.setItem('token', data.token);
+        navigate('/tasks');
+      } else {
+        setError(data.error);
+      }
+    } catch (err) {
+      console.error(err);
+      setError('Login failed');
+    }
+  };
+
+  return (
+    <div>
+      <h2>Login</h2>
+      <form onSubmit={handleLogin}>
+        <input type="text" placeholder="Username" value={username}
+               onChange={e => setUsername(e.target.value)} required /><br/>
+        <input type="password" placeholder="Password" value={password}
+               onChange={e => setPassword(e.target.value)} required /><br/>
+        <button type="submit">Login</button>
+      </form>
+      {error && <p style={{ color: 'red' }}>{error}</p>}
+      <p>Don't have an account? <Link to="/register">Register</Link></p>
+    </div>
+  );
+};
+
+export default Login;
+
+6. src/components/Register.tsx
+
+import React, { useState } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
+
+const Register: React.FC = () => {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const navigate = useNavigate();
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const response = await fetch(`${process.env.REACT_APP_API_URL}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await response.json();
+      if (response.ok) {
+        navigate('/login');
+      } else {
+        setError(data.error);
+      }
+    } catch (err) {
+      console.error(err);
+      setError('Registration failed');
+    }
+  };
+
+  return (
+    <div>
+      <h2>Register</h2>
+      <form onSubmit={handleRegister}>
+        <input type="text" placeholder="Username" value={username}
+               onChange={e => setUsername(e.target.value)} required /><br/>
+        <input type="password" placeholder="Password" value={password}
+               onChange={e => setPassword(e.target.value)} required /><br/>
+        <button type="submit">Register</button>
+      </form>
+      {error && <p style={{ color: 'red' }}>{error}</p>}
+      <p>Already have an account? <Link to="/login">Login</Link></p>
+    </div>
+  );
+};
+
+export default Register;
+
+7. src/components/Tasks.tsx
+
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+
+interface Task {
+  id: number;
+  title: string;
+  description?: string;
+  isComplete: boolean;
+}
+
+const Tasks: React.FC = () => {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [error, setError] = useState('');
+  const navigate = useNavigate();
+  const token = localStorage.getItem('token');
+
+  useEffect(() => {
+    fetchTasks();
+  }, []);
+
+  const fetchTasks = async () => {
+    try {
+      const response = await fetch(`${process.env.REACT_APP_API_URL}/tasks`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setTasks(data);
+      } else if (response.status === 401 || response.status === 403) {
+        localStorage.removeItem('token');
+        navigate('/login');
+      }
+    } catch (err) {
+      console.error(err);
+      setError('Failed to fetch tasks');
+    }
+  };
+
+  const addTask = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const response = await fetch(`${process.env.REACT_APP_API_URL}/tasks`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ title, description })
+      });
+      if (response.ok) {
+        const newTask = await response.json();
+        setTasks([...tasks, newTask]);
+        setTitle('');
+        setDescription('');
+      } else {
+        const data = await response.json();
+        setError(data.error || 'Failed to add task');
+      }
+    } catch (err) {
+      console.error(err);
+      setError('Failed to add task');
+    }
+  };
+
+  const updateTask = async (task: Task) => {
+    try {
+      const response = await fetch(`${process.env.REACT_APP_API_URL}/tasks/${task.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          title: task.title,
+          description: task.description,
+          isComplete: !task.isComplete
+        })
+      });
+      if (response.ok) {
+        const updatedTask = await response.json();
+        setTasks(tasks.map(t => t.id === updatedTask.id ? updatedTask : t));
+      } else {
+        const data = await response.json();
+        setError(data.error || 'Failed to update task');
+      }
+    } catch (err) {
+      console.error(err);
+      setError('Failed to update task');
+    }
+  };
+
+  const deleteTask = async (id: number) => {
+    try {
+      const response = await fetch(`${process.env.REACT_APP_API_URL}/tasks/${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        setTasks(tasks.filter(task => task.id !== id));
+      } else {
+        const data = await response.json();
+        setError(data.error || 'Failed to delete task');
+      }
+    } catch (err) {
+      console.error(err);
+      setError('Failed to delete task');
+    }
+  };
+
+  const logout = () => {
+    localStorage.removeItem('token');
+    navigate('/login');
+  };
+
+  return (
+    <div>
+      <h2>Tasks</h2>
+      <button onClick={logout}>Logout</button>
+      <form onSubmit={addTask}>
+        <input type="text" placeholder="Task title" value={title}
+               onChange={e => setTitle(e.target.value)} required /><br/>
+        <textarea placeholder="Task description" value={description}
+                  onChange={e => setDescription(e.target.value)} /><br/>
+        <button type="submit">Add Task</button>
+      </form>
+      {error && <p style={{ color: 'red' }}>{error}</p>}
+      <ul>
+        {tasks.map(task => (
+          <li key={task.id}>
+            <span style={{ textDecoration: task.isComplete ? 'line-through' : 'none' }}>
+              {task.title} {task.description && `- ${task.description}`}
+            </span>
+            <button onClick={() => updateTask(task)}>
+              {task.isComplete ? 'Undo' : 'Complete'}
+            </button>
+            <button onClick={() => deleteTask(task.id)}>Delete</button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+};
+
+export default Tasks;
+
+
+
+
